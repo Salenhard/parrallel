@@ -2,6 +2,7 @@
 #include <vector>
 #include <chrono>
 #include <omp.h>
+#include <fstream>
 
 double average_omp(const double* vector, size_t n) {
     double sum = 0.0;
@@ -33,30 +34,45 @@ double avg(const double* vector, size_t n){
 
 int main() {
     size_t N = 200000000;
-    std::cout << "Input N:";
-    std::cin >> N;
-    std::vector<double> data(N);
+    // std::cout << "Input N: ";
+    // std::cin >> N;
 
+    std::vector<double> data(N);
     for (size_t i = 0; i < N; i++)
         data[i] = i;
 
-    std::cout << "N = " << N << std::endl;
+    auto start = std::chrono::high_resolution_clock::now();
+    double ref = avg(data.data(), N);
+    auto end = std::chrono::high_resolution_clock::now();
+    double time_1 = std::chrono::duration<double>(end - start).count();
 
-    auto start_sync = std::chrono::high_resolution_clock::now();
-    double r1 = avg(data.data(), N);
-    auto end_sync = std::chrono::high_resolution_clock::now();
-    double time_sync = std::chrono::duration<double>(end_sync - start_sync).count();
+    std::cout << "Baseline avg = " << ref << ", time = " << time_1 << " s\n";
 
-    auto start_omp = std::chrono::high_resolution_clock::now();
-    double r2 = average_omp(data.data(), N);
-    auto end_omp = std::chrono::high_resolution_clock::now();
-    double time_omp = std::chrono::duration<double>(end_omp - start_omp).count();
+    std::ofstream csv("results.csv");
+    csv << "T,time,acceleration\n";
 
-    std::cout << "avg() result          = " << r1 << std::endl;
-    std::cout << "average_omp() result  = " << r2 << std::endl;
+    int max_threads = omp_get_max_threads();
 
-    std::cout << "Sync time: "    << time_sync << " s" << std::endl;
-    std::cout << "OMP time:  "    << time_omp << " s" << std::endl;
+    for (int T = 1; T <= max_threads; T++) {
+        omp_set_num_threads(T);
+
+        auto t_start = std::chrono::high_resolution_clock::now();
+        double r = average_omp(data.data(), N);
+        auto t_end = std::chrono::high_resolution_clock::now();
+
+        double time_T = std::chrono::duration<double>(t_end - t_start).count();
+        double acceleration = time_1 / time_T;
+
+        csv << T << "," << time_T << "," << acceleration << "\n";
+
+        std::cout << "T=" << T
+                  << " time=" << time_T
+                  << " accel=" << acceleration << std::endl;
+    }
+
+    csv.close();
+    std::cout << "Saved to results.csv\n";
 
     return 0;
 }
+
