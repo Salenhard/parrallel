@@ -1,0 +1,1 @@
+g++ -O2 -fopenmp laba1.cpp -o laba1.exe
