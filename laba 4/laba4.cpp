@@ -1,341 +1,301 @@
+
+﻿#include <complex>
 #include <iostream>
-#include <vector>
-#include <complex>
-#include <chrono>
-#include <cmath>
+#include <numbers>
 #include <random>
-#include <iomanip>
+#include <thread>
+#include <vector>
 #include <omp.h>
+#include <filesystem>
 #include <fstream>
-const double PI = 3.14159265358979323846;
 
-std::vector<std::complex<double>> calculate_w(size_t n) {
-    std::vector<std::complex<double>> w(n);
-    for (size_t k = 0; k < n; k++) {
-        double angle = 2 * PI * k / n;
-        w[k] = std::polar(1.0, angle);
+using namespace std::numbers;
+
+constexpr size_t MAX_TASK_DEPTH = 100;
+
+void print_vector(const std::vector<std::complex<double>>& v) {
+    for (std::size_t i = 0; i < v.size(); i++)
+    {
+        std::cout << "[" << i << "] " << std::fixed << v[i] << "\n";
     }
-    return w;
-}
+};
 
-void dft_generic(const std::vector<std::complex<double>>& input, std::vector<std::complex<double>>& output, const std::vector<std::complex<double>>& w) {
-    size_t n = input.size();
-    output.resize(n);
-    for (size_t k = 0; k < n; k++) {
-        output[k] = std::complex<double>(0.0, 0.0);
-        for (size_t j = 0; j < n; j++) {
-            output[k] += input[j] * w[j * k % n];
+void randomize_vector(std::vector<std::complex<double>>& v) {
+    std::uniform_real_distribution<double> unif(0, 100000);
+    static std::random_device rd;
+    std::default_random_engine re(rd());
+    for (auto & i : v)
+    {
+        i = unif(re);
+    }
+};
+
+bool approx_equal(const std::vector<std::complex<double>>& v,
+                  const std::vector<std::complex<double>>& u) {
+    for (std::size_t i = 0; i < v.size(); i++)
+    {
+        if (std::abs(v[i] - u[i]) > 0x1P-10)
+        {
+            std::cout << "Mismatch at index " << i
+                      << ": " << v[i] << " != " << u[i]
+                      << " (diff = " << std::abs(v[i] - u[i]) << ")"
+                      << std::endl;
+            return false;
         }
     }
-}
+    return true;
+};
 
-void dft(const std::vector<std::complex<double>>& time, std::vector<std::complex<double>>& spectrum, size_t n) {
-    std::vector<std::complex<double>> w = calculate_w(n);
-    dft_generic(time, spectrum, w);
-}
 
-void idft(const std::vector<std::complex<double>>& spectrum, std::vector<std::complex<double>>& time, size_t n) {
-    std::vector<std::complex<double>> w = calculate_w(n);
-    for (auto& val : w) {
-        val = std::conj(val) / static_cast<double>(n);
+void dft_generic(const std::complex<double>* input, std::complex<double>* output, size_t n, std::complex<double> w, int inverse) {
+
+    for (size_t k = 0; k < n; k++) {
+        std::complex<double> sum(0.0, 0.0);
+        std::complex<double> w_k = std::pow(w, static_cast<double>(k));
+        std::complex<double> w_power = 1.0;
+
+        for (size_t m = 0; m < n; m++) {
+            sum += input[m] * w_power;
+            w_power *= w_k;
+        }
+
+        output[k] = (inverse == -1) ? sum / static_cast<double>(n) : sum;
     }
-    dft_generic(spectrum, time, w);
 }
 
-void fft_generic(const std::complex<double>* in, std::complex<double>* out, size_t n, std::complex<double> w, size_t s) 
+void dft(const std::complex<double>* time, std::complex<double>* spectrum, size_t n, std::complex<double> w)
 {
-    if (n == 1) {
-        out[0] = in[0];
+    dft_generic(time, spectrum, n, w, 1);
+}
+
+void idft(const std::complex<double>* spectrum, std::complex<double>* restored, size_t n, std::complex<double> w)
+{
+    dft_generic(spectrum, restored, n, w, -1);
+}
+
+void test_dft_correctness(size_t n) {
+    std::cout << "======= Test DFT ==========" << std::endl;
+
+    std::vector<std::complex<double>> original(n);
+    if (n < 40)
+        randomize_vector(original);
+
+    std::cout << std::endl << "====== Original signal =======" << std::endl;
+    if (n < 40)
+        print_vector(original);
+
+    std::vector<std::complex<double>> spectrum(n);
+    std::complex<double> w1 = std::polar(1.0, -2.0 * pi_v<double> / n);
+
+    auto fft_start = std::chrono::high_resolution_clock::now();
+    dft(original.data(), spectrum.data(), n, w1);
+    auto fft_end = std::chrono::high_resolution_clock::now();
+    auto fft_time = std::chrono::duration_cast<std::chrono::milliseconds>(fft_end - fft_start);
+
+    std::cout << std::endl << "===== Spectrum =======" << std::endl;
+    if (n < 40)
+        print_vector(spectrum);
+
+    std::cout << std::endl << "====== DFT TIME =======" << std::endl;
+    std::cout << "DFT time: " << fft_time.count() << " ms" << std::endl;
+
+    // 3. Выполняем обратное DFT
+    std::vector<std::complex<double>> restored(n);
+    std::complex<double> w2 = std::polar(1.0, 2.0 * pi_v<double> / n);
+
+    auto ifft_start = std::chrono::high_resolution_clock::now();
+    idft(spectrum.data(), restored.data(), n, w2);
+    auto ifft_end = std::chrono::high_resolution_clock::now();
+    auto ifft_time = std::chrono::duration_cast<std::chrono::milliseconds>(ifft_end - ifft_start);
+
+    std::cout << std::endl << "====== Restored signal =========" << std::endl;
+    if (n < 40)
+        print_vector(restored);
+
+    std::cout << std::endl << "====== iDFT TIME =======" << std::endl;
+    std::cout << "iDFT time: " << ifft_time.count() << " ms" << std::endl;
+
+    std::cout << std::endl << "====== Check =========" << std::endl;
+    if (!approx_equal(original, restored)) {
+        std::cout << std::endl << "====== Error =========" << std::endl;
+    } else {
+        std::cout << std::endl << "====== OK =========" << std::endl;
+    }
+}
+
+void fft_openmp_core(std::complex<double>* data, size_t n, int inverse, size_t depth = 0) {
+
+    if (n <= 1) return;
+
+    std::vector<std::complex<double>> even(n/2), odd(n/2);
+
+#pragma omp parallel for if(depth == 0 && n > 1000)
+    for (size_t i = 0; i < n/2; i++) {
+        even[i] = data[2 * i];
+        odd[i] = data[2 * i + 1];
+    }
+
+#pragma omp task shared(even) if(depth < MAX_TASK_DEPTH && n > 1000)
+    {
+        fft_openmp_core(even.data(), n / 2, inverse, depth + 1);
+    }
+
+#pragma omp task shared(odd) if(depth < MAX_TASK_DEPTH && n > 1000)
+    {
+        fft_openmp_core(odd.data(), n / 2, inverse, depth + 1);
+    }
+
+#pragma omp taskwait
+
+#pragma omp parallel for if(depth == 0 && n > 1000)
+    for (size_t i = 0; i < n / 2; i++) {
+        double angle = (inverse == 1) ? -2.0 * pi_v<double> * i / n : 2.0 * pi_v<double> * i / n;
+        std::complex<double> w = std::polar(1.0, angle);
+
+        std::complex<double> t = w * odd[i];
+        data[i] = even[i] + t;
+        data[i + n / 2] = even[i] - t;
+    }
+}
+
+void fft_recursive(std::complex<double>* data, size_t n, int inverse) {
+#pragma omp parallel
+#pragma omp single nowait
+    {
+        fft_openmp_core(data, n, inverse, 0);
+    }
+}
+
+void fft_openmp(std::complex<double>* data, size_t n) {
+    fft_recursive(data, n, 1);
+}
+
+void ifft_openmp(std::complex<double>* data, size_t n) {
+    fft_recursive(data, n, -1);
+#pragma omp parallel for
+    for (size_t i = 0; i < n; i++) {
+        data[i] /= static_cast<double>(n);
+    }
+}
+
+
+void test_fft_openmp_correctness(size_t n) {
+    std::cout << "======= Test OPEN MP ==========" << std::endl;
+
+    std::vector<std::complex<double>> original(n);
+    if (n < 40)
+        randomize_vector(original);
+
+    std::cout << std::endl << "====== Original signal =======" << std::endl;
+    if (n < 40)
+        print_vector(original);
+
+    std::vector<std::complex<double>> original_copy = original;
+    std::vector<std::complex<double>> spectrum = original;
+
+    auto fft_start = std::chrono::high_resolution_clock::now();
+    fft_openmp(spectrum.data(), n);
+    auto fft_end = std::chrono::high_resolution_clock::now();
+    auto fft_time = std::chrono::duration_cast<std::chrono::milliseconds>(fft_end - fft_start);
+
+    std::cout << std::endl << "====== Spectrum =======" << std::endl;
+    if (n < 40)
+        print_vector(spectrum);
+
+    std::cout << std::endl << "====== OPEN MP TIME =======" << std::endl;
+    std::cout << "FFT time: " << fft_time.count() << " ms" << std::endl;
+
+
+    auto ifft_start = std::chrono::high_resolution_clock::now();
+    ifft_openmp(spectrum.data(), n);
+    auto ifft_end = std::chrono::high_resolution_clock::now();
+    auto ifft_time = std::chrono::duration_cast<std::chrono::milliseconds>(ifft_end - ifft_start);
+
+    std::cout << std::endl << "====== Restored signal =========" << std::endl;
+    if (n < 40)
+        print_vector(spectrum);
+
+    std::cout << std::endl << "====== INVERSE OPEN MP TIME =======" << std::endl;
+    std::cout << "Total time: " << (fft_time + ifft_time).count() << " ms" << std::endl;
+
+    if (!approx_equal(original_copy, spectrum)) {
+        std::cout << std::endl << "====== Error =========" << std::endl;
+    } else {
+        std::cout << std::endl << "====== OK =========" << std::endl;
+    }
+}
+
+
+void speedtest_fft_openmp(size_t n, size_t exp_count) {
+    std::cout << "======= SPEEDTEST OPEN MP FFT ==========" << std::endl;
+
+    std::cout << "Current dir: " << std::filesystem::current_path() << std::endl;
+    auto base_dir = std::filesystem::current_path().parent_path();
+    std::ofstream output(base_dir.append("output.csv"));
+    if (!output.is_open())
+    {
+        std::cout << "Error while opening file" << std::endl;
         return;
     }
 
-    const size_t half = n / 2;
-    
-    fft_generic(in,       out,       half, w * w, 2 * s);
-    fft_generic(in + s,   out + half, half, w * w, 2 * s);
-    
-    std::complex<double> w_k = 1.0;
-    
-    for (size_t k = 0; k < half; ++k) {
-        std::complex<double> even = out[k];
-        std::complex<double> odd  = out[k + half] * w_k;
-        
-        out[k]       = even + odd;
-        out[k + half] = even - odd;
+    output << "T,Time,Avg,Acceleration\n";
 
-        w_k *= w;
+    std::vector<std::complex<double>> original(n);
+    randomize_vector(original);
+
+    std::vector<std::complex<double>> original_copy = original;
+
+    double time_sum_1;
+    for (int thread_num = 1; thread_num <= std::thread::hardware_concurrency(); thread_num++) {
+        omp_set_num_threads(thread_num);
+
+        double time_sum = 0;
+        auto t0 = std::chrono::steady_clock::now();
+
+        original = original_copy;
+
+        for (size_t exp = 0; exp < exp_count; exp++) {
+
+            std::vector<std::complex<double>> spectrum = original;
+            std::vector<std::complex<double>> restored(n);
+
+            auto t1 = std::chrono::high_resolution_clock::now();
+            fft_openmp(spectrum.data(), n);
+            ifft_openmp(spectrum.data(), n);
+            auto t2 = std::chrono::high_resolution_clock::now();
+            time_sum += std::chrono::duration_cast<std::chrono::milliseconds>(t2 - t1).count();
+
+            if (!approx_equal(original_copy, spectrum)) {
+                std::cout << "Warning: FFT/IFFT mismatch in experiment " << exp + 1
+                          << " with " << thread_num << " thread_num\n";
+            }
+        }
+
+
+        auto total_time = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0);
+
+        if (thread_num == 1) {
+            time_sum_1 = time_sum;
+        }
+
+    std::cout << "FFT: T = " << thread_num << "\t| total experiment time: " << total_time.count() << "\t| avg fft time = "
+              << time_sum / exp_count << "\tacceleration = " << (time_sum_1 / exp_count) / (time_sum / exp_count) << "\n";
+
+    output << thread_num << "," << total_time.count() << "," << time_sum / exp_count << "," << (time_sum_1 / exp_count) / (time_sum / exp_count) << std::endl;
+
     }
+
+    output.close();
 }
 
-void fft(std::complex<double>* data, size_t n) {
-    if ((n & (n - 1)) != 0) {
-        throw std::invalid_argument("n must be power of 2");
-    }
-    
-    std::complex<double>* temp = new std::complex<double>[n];
-
-    
-    std::complex<double> w = std::exp(std::complex<double>(0, -2.0 * PI / n));
-    
-    fft_generic(data, temp, n, w, 1);
-    std::copy(temp, temp + n, data);
-    delete[] temp;
-}
-
-
-void ifft(std::complex<double>* data, size_t n) {
-    if ((n & (n - 1)) != 0) {
-        throw std::invalid_argument("n must be power of 2");
-    }
-    
-    std::complex<double>* temp = new std::complex<double>[n];
-    
-    std::complex<double> w = std::exp(std::complex<double>(0, 2.0 * PI / n));
-    
-    fft_generic(data, temp, n, w, 1);
-    
-    for (size_t i = 0; i < n; ++i) {
-        data[i] = temp[i] / static_cast<double>(n);
-    }
-    delete[] temp;
-}
-
-void fft_omp_recursive(const std::complex<double> *in,
-                       std::complex<double> *out,
-                       size_t n,
-                       std::complex<double> w,
-                       size_t s,
-                       int depth = 0)
+int main()
 {
-    if (n == 1) {
-        out[0] = in[0];
-        return;
-    }
+    //    test_dft_correctness(1 << 4);
 
-    const size_t half = n / 2;
-    
-    if (depth < 4 && n > 1024) {
-        #pragma omp task shared(in, out)
-        fft_omp_recursive(in, out, half, w * w, 2 * s, depth + 1);
-        
-        #pragma omp task shared(in, out)
-        fft_omp_recursive(in + s, out + half, half, w * w, 2 * s, depth + 1);
-        
-        #pragma omp taskwait
-    } else {
-        fft_omp_recursive(in, out, half, w * w, 2 * s, depth + 1);
-        fft_omp_recursive(in + s, out + half, half, w * w, 2 * s, depth + 1);
-    }
-    
-    std::complex<double> w_k = 1.0;
-    
-    if (half > 512) {
-        #pragma omp parallel for firstprivate(w_k)
-        for (size_t k = 0; k < half; ++k) {
-            w_k = std::pow(w, static_cast<double>(k));
-            std::complex<double> even = out[k];
-            std::complex<double> odd = out[k + half] * w_k;
-            out[k] = even + odd;
-            out[k + half] = even - odd;
-        }
-    } else {
-        for (size_t k = 0; k < half; ++k) {
-            std::complex<double> even = out[k];
-            std::complex<double> odd = out[k + half] * w_k;
-            out[k] = even + odd;
-            out[k + half] = even - odd;
-            w_k *= w;
-        }
-    }
-}
+    //    std::cout << std::endl << std::endl;
 
-void fft_parallel(std::complex<double>* data, size_t n) {
-    if ((n & (n - 1)) != 0) {
-        throw std::invalid_argument("n must be power of 2");
-    }
-    
-    std::complex<double>* temp = new std::complex<double>[n];
-    std::complex<double> w = std::exp(std::complex<double>(0, -2.0 * PI / n));
-    
-    #pragma omp parallel
-    {
-        #pragma omp single
-        fft_omp_recursive(data, temp, n, w, 1, 0);
-    }
-    
-    std::copy(temp, temp + n, data);
-    delete[] temp;
-}
+    //    test_fft_openmp_correctness(1 << 4);
 
-void ifft_parallel(std::complex<double>* data, size_t n) {
-    if ((n & (n - 1)) != 0) {
-        throw std::invalid_argument("n must be power of 2");
-    }
-    
-    std::complex<double>* temp = new std::complex<double>[n];
-    std::complex<double> w = std::exp(std::complex<double>(0, 2.0 * PI / n));
-    
-    #pragma omp parallel
-    {
-        #pragma omp single
-        fft_omp_recursive(data, temp, n, w, 1, 0);
-    }
-
-    for (size_t i = 0; i < n; ++i) {
-        data[i] = temp[i] / static_cast<double>(n);
-    }
-
-    std::copy(temp, temp + n, data);
-    delete[] temp;
-}
-
-void run_dft(const std::vector<std::complex<double>>& input, 
-             std::vector<std::complex<double>>& output) {
-    size_t n = input.size();
-    const double pi = std::acos(-1.0);
-    
-    // Предвычисление поворотных множителей для DFT
-    std::vector<std::complex<double>> w(n);
-    for (size_t i = 0; i < n; ++i) {
-        w[i] = std::exp(std::complex<double>(0, -2.0 * pi * i / n));
-    }
-    
-    dft_generic(input, output, w);
-}
-
-void run_sequential(std::vector<std::complex<double>>& data) {
-    size_t n = data.size();
-    std::vector<std::complex<double>> temp(n);
-    double pi = std::acos(-1.0);
-    std::complex<double> w = std::exp(std::complex<double>(0, -2.0 * pi / n));
-    fft_generic(data.data(), temp.data(), n, w, 1);
-    data = temp;
-}
-
-void run_omp(std::vector<std::complex<double>>& data) {
-    size_t n = data.size();
-    std::vector<std::complex<double>> temp(n);
-    double pi = std::acos(-1.0);
-    std::complex<double> w = std::exp(std::complex<double>(0, -2.0 * pi / n));
-    
-    #pragma omp parallel
-    {
-        #pragma omp single
-        fft_omp_recursive(data.data(), temp.data(), n, w, 1, 0);
-    }
-    data = temp;
-}
-
-double max_error(const std::vector<std::complex<double>>& a, 
-                 const std::vector<std::complex<double>>& b) {
-    double err = 0.0;
-    for (size_t i = 0; i < a.size(); ++i) {
-        err = std::max(err, std::abs(a[i] - b[i]));
-    }
-    return err;
-}
-int main() {
-    const size_t N = 1 << 20;          // 2^20
-    const int repetitions = 5;
-    const int max_threads = omp_get_max_threads();
-
-    std::cout << "FFT Benchmark (N = " << N
-              << " = 2^" << static_cast<int>(std::log2(N)) << ")\n";
-    std::cout << "Max available threads: " << max_threads << "\n\n";
-
-    // ---------- генерация входных данных ----------
-    std::vector<std::complex<double>> original(N);
-    std::mt19937 rng(42);
-    std::uniform_real_distribution<double> dist(-1.0, 1.0);
-
-    for (size_t i = 0; i < N; ++i) {
-        original[i] = {dist(rng), dist(rng)};
-    }
-
-    // ---------- baseline (sequential FFT) ----------
-    std::vector<std::complex<double>> baseline(N);
-
-    auto start = std::chrono::high_resolution_clock::now();
-    for (int i = 0; i < repetitions; ++i) {
-        auto copy = original;
-        run_sequential(copy);
-        if (i == 0)
-            baseline = copy;
-    }
-    auto end = std::chrono::high_resolution_clock::now();
-
-    double seq_time =
-        std::chrono::duration<double, std::milli>(end - start).count()
-        / repetitions;
-
-    // ---------- CSV ----------
-    std::ofstream csv("results.csv");
-    csv << "T,time_ms,speedup,efficiency\n";
-    csv << 1 << "," << seq_time << ",1.0,100\n";
-
-    // ---------- таблица ----------
-    std::cout << std::string(70, '-') << "\n";
-    std::cout << std::setw(10) << "Threads"
-              << std::setw(15) << "Time (ms)"
-              << std::setw(15) << "Speedup"
-              << std::setw(15) << "Efficiency\n";
-    std::cout << std::string(70, '-') << "\n";
-
-    std::cout << std::setw(10) << "1 (seq)"
-              << std::setw(15) << std::fixed << std::setprecision(2) << seq_time
-              << std::setw(15) << "1.00x"
-              << std::setw(14) << "100%\n";
-
-    // ---------- OMP прогоны ----------
-    for (int t = 1; t <= max_threads; ++t) {
-        omp_set_num_threads(t);
-
-        // warm-up
-        auto warmup = original;
-        run_omp(warmup);
-
-        start = std::chrono::high_resolution_clock::now();
-        for (int i = 0; i < repetitions; ++i) {
-            auto copy = original;
-            run_omp(copy);
-        }
-        end = std::chrono::high_resolution_clock::now();
-
-        double time =
-            std::chrono::duration<double, std::milli>(end - start).count()
-            / repetitions;
-
-        // проверка корректности для 1 потока
-        if (t == 1) {
-            double err = max_error(baseline, warmup);
-            std::cout << "[Check: max error vs sequential = "
-                      << std::scientific << err << "]\n";
-        }
-
-        double speedup = seq_time / time;
-        double efficiency = (speedup / t) * 100.0;
-
-        std::cout << std::setw(10) << t
-                  << std::fixed << std::setprecision(2)
-                  << std::setw(15) << time
-                  << std::setw(14) << speedup << "x"
-                  << std::setw(14) << static_cast<int>(efficiency) << "%";
-
-        if (t == max_threads)
-            std::cout << "  <-- max";
-        std::cout << "\n";
-
-        // CSV
-        csv << t << ","
-            << time << ","
-            << speedup << ","
-            << efficiency << "\n";
-    }
-
-    std::cout << std::string(70, '-') << "\n";
-    csv.close();
-
-    std::cout << "CSV saved to results.csv\n";
+    speedtest_fft_openmp(1 << 14, 5);
     return 0;
 }
-
